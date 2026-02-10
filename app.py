@@ -65,7 +65,7 @@ if uploaded_file is not None:
         df_ref = df.copy()
         source_name = "主分析資料 (自建常模)"
 
-    # 3. 建立模型
+    # 3. 建立模型 (計算 Slope, Intercept, R-squared)
     if model_basis == "僅用首次檢測數據 (推薦)":
         train_df = df_ref.sort_values('篩檢日期').drop_duplicates(subset='姓名', keep='first')
     else:
@@ -74,8 +74,17 @@ if uploaded_file is not None:
     valid_train = train_df[(train_df['年紀'] > 0) & (train_df['端粒長度'] > 0)]
 
     if len(valid_train) > 5:
+        # 迴歸計算
         slope, intercept = np.polyfit(valid_train['年紀'], valid_train['端粒長度'], 1)
-        st.sidebar.success(f"✅ 模型已建立 ({len(valid_train)} 人)\n`y = {slope:.4f}x + {intercept:.2f}`")
+        
+        # 計算 R-squared (決定係數)
+        correlation_matrix = np.corrcoef(valid_train['年紀'], valid_train['端粒長度'])
+        correlation_xy = correlation_matrix[0,1]
+        r_squared = correlation_xy**2
+
+        st.sidebar.success(f"✅ 模型已建立 ({len(valid_train)} 人)")
+        st.sidebar.markdown(f"**R²**: `{r_squared:.4f}`")
+        st.sidebar.markdown(f"**公式**: `y = {slope:.4f}x + {intercept:.2f}`")
 
         def calculate_telomere_age(length):
             if slope == 0: return 0
@@ -84,13 +93,18 @@ if uploaded_file is not None:
         # 應用模型
         df['端粒年齡'] = df['端粒長度'].apply(calculate_telomere_age)
         df_ref['端粒年齡'] = df_ref['端粒長度'].apply(calculate_telomere_age)
+        # 為模型訓練資料也算一下，方便 Tab 5 展示
+        valid_train['推算年齡'] = valid_train['端粒長度'].apply(calculate_telomere_age)
+
     else:
         st.warning("⚠️ 樣本不足，無法建立模型。")
         slope, intercept = 0, 0
+        r_squared = 0
         df['端粒年齡'] = df['年紀']
         df_ref['端粒年齡'] = df_ref['年紀']
+        valid_train = pd.DataFrame() # 空白
 
-    # === 計算前後測統計 (新增：抓取端粒年齡) ===
+    # === 計算前後測統計 ===
     person_stats = []
     for name, group in df.groupby('姓名'):
         if len(group) >= 2:
@@ -102,8 +116,8 @@ if uploaded_file is not None:
                 '備註': first_rec['備註'],
                 '首次數值': first_rec['端粒長度'],
                 '末次數值': last_rec['端粒長度'],
-                '首次年齡': first_rec['端粒年齡'],  # 新增
-                '末次年齡': last_rec['端粒年齡'],  # 新增
+                '首次年齡': first_rec['端粒年齡'],
+                '末次年齡': last_rec['端粒年齡'],
                 '變化量': last_rec['端粒長度'] - first_rec['端粒長度'],
                 '首次日期': first_rec['篩檢日期'],
                 '末次日期': last_rec['篩檢日期']
@@ -111,12 +125,13 @@ if uploaded_file is not None:
     df_changes = pd.DataFrame(person_stats)
     all_teams = sorted(list(df['備註'].unique()))
 
-    # --- 頁籤 ---
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # --- 頁籤定義 ---
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 團隊改善成效", 
         "👤 個人追蹤 (多選比較)", 
-        "📉 資料庫常模分析", 
-        "🔄 團隊前後測追蹤"
+        "📉 分析對象落點", 
+        "🔄 團隊前後測追蹤",
+        "🧮 模型建構詳情 (New)"
     ])
 
     # === Tab 1: 團隊成效 ===
@@ -144,7 +159,7 @@ if uploaded_file is not None:
         else:
             st.info("資料不足。")
 
-    # === Tab 2: 個人追蹤 (更新：底部表格) ===
+    # === Tab 2: 個人追蹤 ===
     with tab2:
         st.subheader("個人詳細檢測報告")
         sel_team_ind = st.selectbox("1. 選擇團隊", all_teams, key="ind_team")
@@ -153,7 +168,6 @@ if uploaded_file is not None:
 
         if sel_people:
             multi_df = df[df['姓名'].isin(sel_people)].sort_values('篩檢日期')
-            
             st.markdown("#### 📈 端粒變化趨勢")
             fig_line_p = px.line(multi_df, x="篩檢日期", y="端粒長度", color="姓名", markers=True)
             st.plotly_chart(fig_line_p, use_container_width=True)
@@ -164,24 +178,22 @@ if uploaded_file is not None:
             fig_bar_p.update_traces(texttemplate='%{text:.2f}', textposition='outside')
             st.plotly_chart(fig_bar_p, use_container_width=True)
             
-            # 新增：詳細數據表
             st.markdown("#### 📋 詳細數據列表")
             st.dataframe(multi_df[['姓名', '篩檢日期', '端粒長度', '端粒年齡', '備註']]
                          .style.format({"端粒長度": "{:.3f}", "端粒年齡": "{:.1f}"}))
         else:
             st.info("請勾選人員。")
 
-    # === Tab 3: 常模分析 ===
+    # === Tab 3: 分析對象落點 (Target vs Norm) ===
     with tab3:
-        st.subheader(f"常模分析 (來源: {source_name})")
+        st.subheader("分析對象落點 (與常模比較)")
         sel_corr_teams = st.multiselect("篩選顯示團隊", all_teams, default=all_teams, key="corr_team")
         
         fig_scatter = go.Figure()
-        # 背景
-        if source_name == "獨立常模資料庫":
-            fig_scatter.add_trace(go.Scatter(x=df_ref['年紀'], y=df_ref['端粒長度'], mode='markers', name='常模資料庫', marker=dict(color='lightgray', size=5)))
+        # 背景：畫出所有常模點 (灰色)
+        fig_scatter.add_trace(go.Scatter(x=valid_train['年紀'], y=valid_train['端粒長度'], mode='markers', name='常模背景值', marker=dict(color='lightgray', size=5, opacity=0.5)))
         
-        # 前景
+        # 前景：畫出分析對象
         if sel_corr_teams:
             df_target = df[df['備註'].isin(sel_corr_teams)]
             for team_name in sel_corr_teams:
@@ -195,10 +207,10 @@ if uploaded_file is not None:
         # 趨勢線
         x_range = np.linspace(df_ref['年紀'].min(), df_ref['年紀'].max(), 100)
         y_pred = slope * x_range + intercept
-        fig_scatter.add_trace(go.Scatter(x=x_range, y=y_pred, mode='lines', name='趨勢線', line=dict(color='red', dash='dash')))
+        fig_scatter.add_trace(go.Scatter(x=x_range, y=y_pred, mode='lines', name='模型趨勢線', line=dict(color='red', dash='dash')))
         st.plotly_chart(fig_scatter, use_container_width=True)
 
-    # === Tab 4: 前後測追蹤 (更新：表格欄位) ===
+    # === Tab 4: 前後測追蹤 ===
     with tab4:
         st.header("🔄 團隊前後測結果對比")
         target_team = st.selectbox("選擇團隊", all_teams, key="pp_team")
@@ -222,8 +234,7 @@ if uploaded_file is not None:
             fig_slope.update_layout(xaxis=dict(showgrid=False), yaxis=dict(title="端粒長度"), showlegend=False)
             st.plotly_chart(fig_slope, use_container_width=True)
 
-            st.subheader("詳細數據表 (含端粒年齡)")
-            # 更新：加入端粒年齡欄位
+            st.subheader("詳細數據表")
             display_cols = ['姓名', '首次數值', '首次年齡', '末次數值', '末次年齡', '變化量']
             st.dataframe(team_changes[display_cols].sort_values('變化量', ascending=False)
                          .style.format({
@@ -234,5 +245,62 @@ if uploaded_file is not None:
         else:
             st.warning("無前後測數據。")
 
+    # === Tab 5: 模型詳情 (New) ===
+    with tab5:
+        st.header("🧮 端粒年齡推算模型詳情")
+        
+        if not valid_train.empty:
+            st.markdown(f"本模型基於 **{source_name}** 建立，共使用 **{len(valid_train)}** 筆有效數據。")
+            
+            # 統計指標區
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("樣本數 (N)", len(valid_train))
+            m2.metric("決定係數 (R²)", f"{r_squared:.4f}", help="越接近 1 代表年齡與端粒長度的相關性越強")
+            m3.metric("斜率 (Slope)", f"{slope:.4f}", help="代表每年平均減少的端粒長度")
+            m4.metric("截距 (Intercept)", f"{intercept:.2f}")
+
+            st.markdown("---")
+            
+            # 模型視覺化 (Scatter + Regression Line)
+            st.subheader("📉 模型回歸曲線圖")
+            
+            fig_model = go.Figure()
+            
+            # 1. 訓練數據點
+            fig_model.add_trace(go.Scatter(
+                x=valid_train['年紀'], 
+                y=valid_train['端粒長度'],
+                mode='markers',
+                name='訓練數據點',
+                marker=dict(color='#636EFA', size=6, opacity=0.6),
+                text=valid_train['姓名'],
+                hovertemplate="姓名: %{text}<br>年紀: %{x}<br>長度: %{y:.3f}"
+            ))
+            
+            # 2. 回歸線
+            x_range = np.linspace(valid_train['年紀'].min(), valid_train['年紀'].max(), 100)
+            y_pred = slope * x_range + intercept
+            fig_model.add_trace(go.Scatter(
+                x=x_range, y=y_pred,
+                mode='lines',
+                name=f'模型: y={slope:.4f}x+{intercept:.2f}',
+                line=dict(color='red', width=3)
+            ))
+
+            fig_model.update_layout(
+                xaxis_title="實際年齡",
+                yaxis_title="端粒長度",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=600
+            )
+            
+            st.plotly_chart(fig_model, use_container_width=True)
+            
+            # 顯示原始訓練資料 (可展開)
+            with st.expander("查看模型使用的原始訓練資料"):
+                st.dataframe(valid_train[['姓名', '備註', '篩檢日期', '年紀', '端粒長度']])
+        else:
+            st.error("尚未建立模型，請先上傳資料。")
+
 else:
-    st.info("👈 請上傳資料")
+    st.info("👈 請從左側上傳分析資料 (必要)")
