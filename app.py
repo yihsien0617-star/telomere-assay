@@ -11,7 +11,9 @@ st.markdown("---")
 
 # --- 側邊欄：設定與資料載入 ---
 st.sidebar.header("📂 資料與模型設定")
-uploaded_file = st.sidebar.file_uploader("請上傳端粒數據 (CSV)", type=['csv'])
+
+# 修改點 1: 允許上傳 CSV 或 Excel
+uploaded_file = st.sidebar.file_uploader("請上傳端粒數據 (CSV/Excel)", type=['csv', 'xlsx', 'xls'])
 
 # 模型建立基準選擇
 st.sidebar.subheader("🧮 端粒年齡推算模型")
@@ -23,12 +25,20 @@ model_basis = st.sidebar.radio(
 
 if uploaded_file is not None:
     try:
-        df = pd.read_csv(uploaded_file)
+        # 修改點 2: 判斷檔案類型並讀取
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        else:
+            # 預設讀取 Excel 的第一個工作表
+            df = pd.read_excel(uploaded_file)
         
         # 欄位檢查
         required_cols = ['姓名', '篩檢日期', '端粒長度', '備註', '年紀']
+        
+        # 檢查欄位是否存在，若缺欄位可能是讀錯工作表
         if not all(col in df.columns for col in required_cols):
-            st.error(f"資料格式錯誤！請確保 CSV 包含以下欄位：{required_cols}")
+            st.error(f"資料格式錯誤！請確保檔案包含以下欄位：{required_cols}")
+            st.warning("如果您上傳的是 Excel，請確保數據位於「第一個工作表」。")
             st.stop()
 
         # === 資料清洗 ===
@@ -88,10 +98,10 @@ if uploaded_file is not None:
         "📊 團隊改善成效", 
         "👤 個人追蹤 (多選比較)", 
         "📉 常模相關性", 
-        "🔄 團隊前後測追蹤 (New)"
+        "🔄 團隊前後測追蹤"
     ])
 
-    # === Tab 1: 團隊成效 (維持原樣) ===
+    # === Tab 1: 團隊成效 ===
     with tab1:
         st.header("團隊整體改善成效評估")
         all_teams = sorted(list(df['備註'].unique()))
@@ -121,7 +131,7 @@ if uploaded_file is not None:
         else:
             st.info("資料不足或未選擇團隊。")
 
-    # === Tab 2: 個人追蹤 (維持原樣) ===
+    # === Tab 2: 個人追蹤 ===
     with tab2:
         st.subheader("個人詳細檢測報告 (可多選比較)")
         all_teams_list = sorted(list(df['備註'].unique()))
@@ -144,7 +154,7 @@ if uploaded_file is not None:
         else:
             st.info("請勾選至少一位人員。")
 
-    # === Tab 3: 常模 (維持原樣) ===
+    # === Tab 3: 常模 ===
     with tab3:
         st.subheader("常模與相關性分析")
         sel_corr_teams = st.multiselect("篩選顯示團隊", all_teams, default=all_teams, key="corr_team")
@@ -156,80 +166,47 @@ if uploaded_file is not None:
             fig_scatter.add_traces(go.Scatter(x=x_range, y=y_pred, mode='lines', name='常模趨勢線', line=dict(color='red', dash='dash')))
             st.plotly_chart(fig_scatter, use_container_width=True)
 
-    # === Tab 4: 團隊前後測追蹤 (NEW!) ===
+    # === Tab 4: 團隊前後測追蹤 ===
     with tab4:
         st.header("🔄 團隊前後測結果對比")
-        st.markdown("此圖表僅顯示成員的 **「第一次」** 與 **「最後一次」** 測量結果，方便快速檢視變化方向。")
-
-        # 1. 選擇單一團隊進行深度分析
         target_team = st.selectbox("請選擇要分析的團隊", all_teams, key="pre_post_team_select")
-        
-        # 篩選該團隊且有兩次以上紀錄的人
         team_changes = df_changes[df_changes['備註'] == target_team]
 
         if not team_changes.empty:
-            # 顯示平均數據
-            col_pp1, col_pp2, col_pp3 = st.columns(3)
-            avg_start = team_changes['首次數值'].mean()
-            avg_end = team_changes['末次數值'].mean()
-            avg_diff = avg_end - avg_start
-            
-            col_pp1.metric("平均首次數值", f"{avg_start:.3f}")
-            col_pp2.metric("平均末次數值", f"{avg_end:.3f}")
-            col_pp3.metric("平均變化量", f"{avg_diff:+.3f}", delta_color="normal")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("平均首次數值", f"{team_changes['首次數值'].mean():.3f}")
+            c2.metric("平均末次數值", f"{team_changes['末次數值'].mean():.3f}")
+            c3.metric("平均變化量", f"{team_changes['變化量'].mean():+.3f}")
 
             st.markdown("---")
-            
-            # --- 繪製 Slope Chart (斜率圖) ---
             st.subheader(f"{target_team} - 成員前後測變化斜率圖")
-            st.caption("🟢 綠色 = 進步 (數值上升) | 🔴 紅色 = 退步 (數值下降)")
-
+            
             fig_slope = go.Figure()
-
             for i, row in team_changes.iterrows():
                 color = 'green' if row['變化量'] >= 0 else 'red'
-                opacity = 0.7
-                
-                # 畫線
                 fig_slope.add_trace(go.Scatter(
-                    x=['首次', '末次'],
-                    y=[row['首次數值'], row['末次數值']],
-                    mode='lines+markers',
-                    name=row['姓名'],
-                    line=dict(color=color, width=2),
-                    marker=dict(size=8),
-                    hoverinfo='text',
-                    hovertext=f"姓名: {row['姓名']}<br>首次: {row['首次數值']:.3f}<br>末次: {row['末次數值']:.3f}<br>變化: {row['變化量']:+.3f}"
+                    x=['首次', '末次'], y=[row['首次數值'], row['末次數值']],
+                    mode='lines+markers', name=row['姓名'],
+                    line=dict(color=color, width=2), marker=dict(size=8),
+                    hovertext=f"{row['姓名']}: {row['變化量']:+.3f}"
                 ))
-
-                # 在線的兩端加上數值標籤 (如果人太多可以考慮隱藏)
-                # 這裡做一個簡單的優化：只在「末次」加標籤，避免太亂
+                # 數值標籤
                 fig_slope.add_trace(go.Scatter(
-                    x=['末次'],
-                    y=[row['末次數值']],
-                    mode='text',
+                    x=['末次'], y=[row['末次數值']], mode='text',
                     text=[f"{row['姓名']} ({row['末次數值']:.2f})"],
-                    textposition="middle right",
-                    showlegend=False
+                    textposition="middle right", showlegend=False
                 ))
 
-            fig_slope.update_layout(
-                xaxis=dict(showgrid=False),
-                yaxis=dict(title="端粒長度"),
-                showlegend=False, # 隱藏圖例因為人名標籤已經在圖上了，或者是因為線太多
-                margin=dict(r=100) # 右邊留白給名字標籤
-            )
+            fig_slope.update_layout(xaxis=dict(showgrid=False), yaxis=dict(title="端粒長度"), showlegend=False)
             st.plotly_chart(fig_slope, use_container_width=True)
 
-            # --- 資料表格 ---
             st.subheader("詳細數據表")
-            display_cols = ['姓名', '首次數值', '末次數值', '變化量', '首次日期', '末次日期']
-            st.dataframe(team_changes[display_cols].sort_values('變化量', ascending=False).style.format({
-                '首次數值': '{:.3f}', '末次數值': '{:.3f}', '變化量': '{:+.3f}'
-            }).background_gradient(subset=['變化量'], cmap='RdYlGn'))
-            
+            # 這裡就是上次修正錯誤的地方，確保 background_gradient 可以運作
+            st.dataframe(team_changes[['姓名', '首次數值', '末次數值', '變化量']].sort_values('變化量', ascending=False)
+                         .style.format({'首次數值':'{:.3f}','末次數值':'{:.3f}','變化量':'{:+.3f}'})
+                         .background_gradient(subset=['變化量'], cmap='RdYlGn'))
         else:
-            st.warning(f"團隊 {target_team} 目前沒有足夠的「前後測」數據 (需至少檢測 2 次)。")
+            st.warning(f"團隊 {target_team} 沒有足夠的前後測數據。")
 
 else:
-    st.info("👈 請從左側選單上傳 CSV 檔案")
+    st.info("👈 請從左側選單上傳 CSV 或 Excel 檔案")
